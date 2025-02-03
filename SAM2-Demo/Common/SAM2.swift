@@ -110,25 +110,38 @@ class SAM2: ObservableObject {
         self.imageEncodings = encoding
     }
 
-    func getPromptEncoding(from allPoints: [SAMPoint], with size: CGSize) async throws {
+    func getPromptEncoding(from allPoints: [SAMPoint]?, with size: CGSize) async throws {
         guard let model = promptEncoderModel else {
             throw SAM2Error.modelNotLoaded
         }
-        
-        let transformedCoords = try transformCoords(allPoints.map { $0.coordinates }, normalize: false, origHW: size)
 
-        // Create MLFeatureProvider with the required input format
-        let pointsMultiArray = try MLMultiArray(shape: [1, NSNumber(value: allPoints.count), 2], dataType: .float32)
-        let labelsMultiArray = try MLMultiArray(shape: [1, NSNumber(value: allPoints.count)], dataType: .int32)
-        
-        for (index, point) in transformedCoords.enumerated() {
-            pointsMultiArray[[0, index, 0] as [NSNumber]] = NSNumber(value: Float(point.x))
-            pointsMultiArray[[0, index, 1] as [NSNumber]] = NSNumber(value: Float(point.y))
-            labelsMultiArray[[0, index] as [NSNumber]] = NSNumber(value: allPoints[index].category.type.rawValue)
+        if let allPoints = allPoints {
+            let transformedCoords = try transformCoords(allPoints.map { $0.coordinates }, normalize: false, origHW: size)
+
+            // Create MLFeatureProvider with the required input format
+            let pointsMultiArray = try MLMultiArray(shape: [1, NSNumber(value: allPoints.count), 2], dataType: .float32)
+            let labelsMultiArray = try MLMultiArray(shape: [1, NSNumber(value: allPoints.count)], dataType: .int32)
+
+            for (index, point) in transformedCoords.enumerated() {
+                pointsMultiArray[[0, index, 0] as [NSNumber]] = NSNumber(value: Float(point.x))
+                pointsMultiArray[[0, index, 1] as [NSNumber]] = NSNumber(value: Float(point.y))
+                labelsMultiArray[[0, index] as [NSNumber]] = NSNumber(value: allPoints[index].category.type.rawValue)
+            }
+
+            let encoding = try model.prediction(points: pointsMultiArray, labels: labelsMultiArray)
+            self.promptEncodings = encoding
+        } else {
+            // Create MLFeatureProvider with the required input format
+            let pointsMultiArray = try MLMultiArray(shape: [1, 1, 2], dataType: .float32)
+            let labelsMultiArray = try MLMultiArray(shape: [1, 1], dataType: .int32)
+
+            pointsMultiArray[[0, 0, 0] as [NSNumber]] = NSNumber(value: 0)
+            pointsMultiArray[[0, 0, 1] as [NSNumber]] = NSNumber(value: 0)
+            labelsMultiArray[[0, 0] as [NSNumber]] = NSNumber(value: -1)
+
+            let encoding = try model.prediction(points: pointsMultiArray, labels: labelsMultiArray)
+            self.promptEncodings = encoding
         }
-        
-        let encoding = try model.prediction(points: pointsMultiArray, labels: labelsMultiArray)
-        self.promptEncodings = encoding
     }
 
     func encodeMemory(pixFeat: MLMultiArray, mask: MLMultiArray) async throws -> (MLMultiArray, MLMultiArray) {
@@ -191,7 +204,13 @@ class SAM2: ObservableObject {
             throw SAM2Error.modelNotLoaded
         }
 
-        let output = try model.prediction(image_embedding: imageEncodings.image_embedding, sparse_embedding: promptEncodings.sparse_embeddings, dense_embedding: promptEncodings.dense_embeddings, feats_s0: imageEncodings.feats_s0, feats_s1: imageEncodings.feats_s1)
+        let output = try model.prediction(
+            image_embedding: imageEncodings.image_embedding,
+            sparse_embedding: promptEncodings.sparse_embeddings,
+            dense_embedding: promptEncodings.dense_embeddings,
+            feats_s0: imageEncodings.feats_s0,
+            feats_s1: imageEncodings.feats_s1
+        )
 
         // Extract best mask and ignore the others
         let lowFeatureMask = bestMask(for: output)
@@ -470,7 +489,7 @@ class SAM2: ObservableObject {
                 processingRange = [] // Skip reverse tracking if starting from frame 0
             }
         } else {
-            endIdx = min(startIdx + maxFrames, 5) //videoFrames.count - 1)
+            endIdx = min(startIdx + maxFrames, videoFrames.count - 1)
             processingRange = Array(startIdx...endIdx)
         }
 
@@ -541,11 +560,9 @@ class SAM2: ObservableObject {
         )
 
         // If we have point inputs, get prompt encoding
-        if let points = pointInputs {
-            let frameSize = CGSize(width: videoFrames[frameIdx].size.width,
-                                   height: videoFrames[frameIdx].size.height)
-            try await getPromptEncoding(from: points, with: frameSize)
-        }
+        let frameSize = CGSize(width: videoFrames[frameIdx].size.width,
+                               height: videoFrames[frameIdx].size.height)
+        try await getPromptEncoding(from: pointInputs, with: frameSize)
 
         // Get predicted mask
         let originalSize = NSSize(
